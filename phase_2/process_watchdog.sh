@@ -1,4 +1,5 @@
 #!/bin/bash
+# NOTE: Asael will update this later so that the comments look less like AI
 # Filename: process_watchdog.sh
 # Purpose: Monitor active system processes against CPU/Memory thresholds,
 #          dynamically apply renice for warnings, and issue SIGTERM/SIGKILL for critical limits.
