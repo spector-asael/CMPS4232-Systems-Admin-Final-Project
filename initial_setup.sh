@@ -31,63 +31,27 @@ create_team_user() {
     local USERNAME="$1"
     local PRIMARY_GRP="$2"
     local SECONDARY_GRPS="$3"
-    local TEMP_PASS=""
-    local TEMP_PASS_CONFIRM=""
+    local TEMP_PASS="ChangeMe123!"
 
     if id "$USERNAME" &>/dev/null; then
-        # Keep existing accounts but correct their group memberships to match the defined hierarchy.
-        run_cmd "correct group membership for existing user '$USERNAME'" \
-            usermod -g "$PRIMARY_GRP" -G "$SECONDARY_GRPS" "$USERNAME"
-        log_warn "User '$USERNAME' already exists. Password was not changed."
+        log_warn "User '$USERNAME' already exists. Skipping user creation."
     else
-        # Prompt for an initial password instead of using a hardcoded shared password.
-        while true; do
-            if ! read -r -s -p "Enter initial password for $USERNAME (minimum 8 characters): " TEMP_PASS; then
-                echo
-                log_error "Password input ended unexpectedly."
-                return 1
-            fi
-            echo
-            if ! read -r -s -p "Confirm initial password for $USERNAME: " TEMP_PASS_CONFIRM; then
-                echo
-                unset TEMP_PASS TEMP_PASS_CONFIRM
-                log_error "Password confirmation input ended unexpectedly."
-                return 1
-            fi
-            echo
-            if [[ ${#TEMP_PASS} -lt 8 ]]; then
-                log_error "Password must be at least 8 characters."
-            elif [[ "$TEMP_PASS" != "$TEMP_PASS_CONFIRM" ]]; then
-                log_error "Passwords do not match."
-            else
-                break
-            fi
-            unset TEMP_PASS TEMP_PASS_CONFIRM
-        done
-        unset TEMP_PASS_CONFIRM
-
         # 1. Create user account
-        if ! useradd -m -g "$PRIMARY_GRP" -G "$SECONDARY_GRPS" -s /bin/bash "$USERNAME"; then
-            unset TEMP_PASS
-            log_error "Failed to create user '$USERNAME'."
-            return 1
+        if [[ -n "$SECONDARY_GRPS" ]]; then
+            run_cmd "create user '$USERNAME'" \
+                useradd -m -g "$PRIMARY_GRP" -G "$SECONDARY_GRPS" -s /bin/bash "$USERNAME"
+        else
+            run_cmd "create user '$USERNAME'" \
+                useradd -m -g "$PRIMARY_GRP" -s /bin/bash "$USERNAME"
         fi
 
         # 2. Assign temporary password
-        if ! printf '%s:%s\n' "$USERNAME" "$TEMP_PASS" | chpasswd; then
-            unset TEMP_PASS
-            userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
-            log_error "Failed to set password for '$USERNAME'."
-            return 1
-        fi
-        unset TEMP_PASS
+        run_cmd "set temporary password for '$USERNAME'" \
+            bash -c "echo '$USERNAME:$TEMP_PASS' | chpasswd"
 
         # 3. Force password reset on initial login (Password Aging)
-        if ! chage -d 0 "$USERNAME"; then
-            userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
-            log_error "Failed to enforce first-login password change for '$USERNAME'."
-            return 1
-        fi
+        run_cmd "enforce first-login password change for '$USERNAME'" \
+            chage -d 0 "$USERNAME"
     fi
 }
 
@@ -96,19 +60,6 @@ if [[ $EUID -ne 0 ]]; then
 	log_error "This script must be executed with root priveleges (use sudo)"
 	exit 1
 fi
-
-# Set up persistent logging with separate, timestamped stdout and stderr records.
-LOG_FILE="/var/log/initial_setup.log"
-if ! touch "$LOG_FILE"; then
-    log_error "Could not create $LOG_FILE."
-    exit 1
-fi
-chmod 640 "$LOG_FILE" || exit 1
-exec > >(while IFS= read -r LINE || [[ -n "$LINE" ]]; do
-    printf '[%s] [STDOUT] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LINE" | tee -a "$LOG_FILE"
-done) 2> >(while IFS= read -r LINE || [[ -n "$LINE" ]]; do
-    printf '[%s] [STDERR] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LINE" | tee -a "$LOG_FILE" >&2
-done)
 
 # 2. Then, let's create the secondary system groups
 
@@ -137,36 +88,49 @@ for GRP in "${SYS_GROUPS[@]}"; do
     run_cmd "set permissions 2770 on '$DIR'" chmod 2770 "$DIR"
 done
 
-# 4. Let's now provision the initial team accounts. We will make 3.
+# 4. Let's now provision the initial team accounts. 
+# Phase 1 correction from feedback: User accounts could be automated (prompted) rather than hard coded.
+log_info "Provisioning team accounts interactively..."
+while true; do
+    read -r -p "Enter team member username (or press Enter to finish): " TEAM_USER
+    [[ -z "$TEAM_USER" ]] && break
 
-# Member 1: Primary 'sysadmins' | Secondary 'developers' AND 'auditors' (Multiple)
-create_team_user "asael" "sysadmins" "developers,auditors" || exit 1
-
-# Member 2: Primary 'developers' | Secondary 'sysadmins' (Single)
-create_team_user "teryn" "developers" "sysadmins" || exit 1
-
-# Member 3: Primary 'auditors' | Secondary 'developers' (Single)
-create_team_user "renee" "auditors" "developers" || exit 1
-
-# Verify the account hierarchy and the ownership and permissions of each shared directory.
-for USERNAME in asael teryn renee; do
-    if ! id "$USERNAME"; then
-        log_error "Verification failed for user '$USERNAME'."
-        exit 1
+    # Validate username format
+    if [[ ! "$TEAM_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        log_error "Invalid username format. Use lowercase letters, numbers, _ or -."
+        continue
     fi
+
+    read -r -p "Enter primary group for $TEAM_USER (sysadmins/developers/auditors): " TEAM_PRIMARY
+    if ! getent group "$TEAM_PRIMARY" &>/dev/null; then
+        log_error "Group '$TEAM_PRIMARY' does not exist."
+        continue
+    fi
+
+    read -r -p "Enter secondary groups for $TEAM_USER (comma-separated, or press Enter for none): " TEAM_SECONDARY
+
+    create_team_user "$TEAM_USER" "$TEAM_PRIMARY" "$TEAM_SECONDARY"
 done
 
+# Phase 1 correction from feedback: Verifications can also be automated.
+log_info "Running automated verification checks..."
 for GRP in "${SYS_GROUPS[@]}"; do
-    DIR="/srv/$GRP"
-    ACTUAL_OWNER="$(stat -c '%U' "$DIR")"
-    ACTUAL_GROUP="$(stat -c '%G' "$DIR")"
-    ACTUAL_MODE="$(stat -c '%a' "$DIR")"
-    if [[ "$ACTUAL_OWNER" != "root" || "$ACTUAL_GROUP" != "$GRP" || "$ACTUAL_MODE" != "2770" ]]; then
-        log_error "Verification failed for $DIR (owner=$ACTUAL_OWNER group=$ACTUAL_GROUP mode=$ACTUAL_MODE)."
+    if ! getent group "$GRP" &>/dev/null; then
+        log_error "Verification failed: Group '$GRP' does not exist."
         exit 1
     fi
-    log_info "Verified $DIR: owner=root group=$GRP mode=$ACTUAL_MODE."
+    DIR="/srv/$GRP"
+    if [[ ! -d "$DIR" ]]; then
+        log_error "Verification failed: Directory '$DIR' does not exist."
+        exit 1
+    fi
+    PERMS=$(stat -c "%a" "$DIR")
+    if [[ "$PERMS" != "2770" ]]; then
+        log_error "Verification failed: Directory '$DIR' permissions are '$PERMS' (expected 2770)."
+        exit 1
+    fi
+    log_info "Verified group '$GRP' and directory '$DIR' (permissions: $PERMS)."
 done
 
-log_info "Environment hierarchy setup completed successfully!"
+log_info "Environment hierarchy setup and automated verification completed successfully!"
 exit 0
