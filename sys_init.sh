@@ -62,7 +62,12 @@ chmod 640 "$LOG_FILE"
 
 # Redirect standard output and standard error to the log file.
 # tee allows the output to still be displayed on the terminal.
-exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
+# Each stream is labelled and timestamped separately for easier verification.
+exec > >(while IFS= read -r LINE || [[ -n "$LINE" ]]; do
+    printf '[%s] [STDOUT] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LINE" | tee -a "$LOG_FILE"
+done) 2> >(while IFS= read -r LINE || [[ -n "$LINE" ]]; do
+    printf '[%s] [STDERR] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LINE" | tee -a "$LOG_FILE" >&2
+done)
 
 # Append a starting message to the log.
 echo "========================================" >> "$LOG_FILE"
@@ -75,7 +80,10 @@ echo "========================================" >> "$LOG_FILE"
 # ------------------------------------------------------------
 
 while true; do
-    read -r -p "Enter the new username: " USERNAME
+    if ! read -r -p "Enter the new username: " USERNAME; then
+        log_error "Input ended unexpectedly."
+        exit 1
+    fi
 
     if [[ -z "$USERNAME" ]]; then
         log_error "Username cannot be empty."
@@ -103,13 +111,16 @@ done
 # ------------------------------------------------------------
 
 while true; do
-    read -r -p \
+    if ! read -r -p \
         "Enter the primary group (sysadmins/developers/auditors): " \
-        PRIMARY_GROUP
+        PRIMARY_GROUP; then
+        log_error "Input ended unexpectedly."
+        exit 1
+    fi
 
     # Check that the group exists.
-    if ! getent group "$PRIMARY_GROUP" &>/dev/null; then
-        log_error "Group '$PRIMARY_GROUP' does not exist."
+    if [[ ! "$PRIMARY_GROUP" =~ ^(sysadmins|developers|auditors)$ ]] || ! getent group "$PRIMARY_GROUP" &>/dev/null; then
+        log_error "Group '$PRIMARY_GROUP' does not exist or is not an allowed project group."
         log_error "Please run initial_setup.sh first or enter a valid group."
         continue
     fi
@@ -122,29 +133,51 @@ done
 # 5. Ask for secondary groups
 # ------------------------------------------------------------
 
-read -r -p \
-    "Enter secondary groups (comma-separated, or press Enter for none): " \
-    SECONDARY_GROUPS
-
 # If secondary groups were entered, check that they exist.
-if [[ -n "$SECONDARY_GROUPS" ]]; then
+while true; do
+    if ! read -r -p \
+        "Enter secondary groups (comma-separated, or press Enter for none): " \
+        SECONDARY_GROUPS; then
+        log_error "Input ended unexpectedly."
+        exit 1
+    fi
 
-    IFS=',' read -ra GROUP_LIST <<< "$SECONDARY_GROUPS"
-
-    for GROUP in "${GROUP_LIST[@]}"; do
-
-        if ! getent group "$GROUP" &>/dev/null; then
-            log_error "Secondary group '$GROUP' does not exist."
-            exit 1
-        fi
-
-        if [[ "$GROUP" == "$PRIMARY_GROUP" ]]; then
-            log_error "Primary group should not also be a secondary group."
-            exit 1
-        fi
-
-    done
-fi
+    GROUP_LIST=()
+    VALID_GROUPS=true
+    if [[ -n "$SECONDARY_GROUPS" ]]; then
+        IFS=',' read -ra RAW_GROUP_LIST <<< "$SECONDARY_GROUPS"
+        declare -A SEEN_GROUPS=()
+        for GROUP in "${RAW_GROUP_LIST[@]}"; do
+            GROUP="${GROUP//[[:space:]]/}"
+            if [[ -z "$GROUP" ]]; then
+                log_error "Empty secondary-group entry. Please try again."
+                VALID_GROUPS=false
+                break
+            fi
+            if [[ ! "$GROUP" =~ ^(sysadmins|developers|auditors)$ ]] || ! getent group "$GROUP" &>/dev/null; then
+                log_error "Secondary group '$GROUP' does not exist or is not an allowed project group."
+                VALID_GROUPS=false
+                break
+            fi
+            if [[ "$GROUP" == "$PRIMARY_GROUP" ]]; then
+                log_error "Primary group should not also be a secondary group."
+                VALID_GROUPS=false
+                break
+            fi
+            if [[ -n "${SEEN_GROUPS[$GROUP]+present}" ]]; then
+                log_error "Secondary group '$GROUP' was entered more than once."
+                VALID_GROUPS=false
+                break
+            fi
+            SEEN_GROUPS["$GROUP"]=1
+            GROUP_LIST+=("$GROUP")
+        done
+    fi
+    if [[ "$VALID_GROUPS" == true ]]; then
+        SECONDARY_GROUPS="$(IFS=,; printf '%s' "${GROUP_LIST[*]}")"
+        break
+    fi
+done
 
 
 # ------------------------------------------------------------
@@ -153,10 +186,19 @@ fi
 
 while true; do
 
-    read -r -s -p "Enter the initial password: " PASSWORD
+    if ! read -r -s -p "Enter the initial password: " PASSWORD; then
+        echo
+        log_error "Password input ended unexpectedly."
+        exit 1
+    fi
     echo
 
-    read -r -s -p "Confirm the initial password: " PASSWORD_CONFIRM
+    if ! read -r -s -p "Confirm the initial password: " PASSWORD_CONFIRM; then
+        echo
+        unset PASSWORD PASSWORD_CONFIRM
+        log_error "Password confirmation input ended unexpectedly."
+        exit 1
+    fi
     echo
 
     if [[ -z "$PASSWORD" ]]; then
@@ -235,6 +277,7 @@ BASHRC="$USER_HOME/.bashrc"
 
 if [[ ! -f "$BASHRC" ]]; then
     log_error "Could not find $BASHRC."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
     exit 1
 fi
 
@@ -252,12 +295,16 @@ then
     log_info "Custom aliases and prompt added to $BASHRC."
 else
     log_error "Failed to update $BASHRC."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
     exit 1
 fi
 
 # Make sure the new user owns the .bashrc file.
-run_cmd "set ownership of $BASHRC" \
-    chown "$USERNAME:$PRIMARY_GROUP" "$BASHRC"
+if ! chown "$USERNAME:$PRIMARY_GROUP" "$BASHRC"; then
+    log_error "Failed to set ownership of $BASHRC."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
+    exit 1
+fi
 
 
 # ------------------------------------------------------------
@@ -268,6 +315,21 @@ log_info "Verifying the new account..."
 
 if ! id "$USERNAME"; then
     log_error "User verification failed."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
+    exit 1
+fi
+
+ACTUAL_PRIMARY_GROUP="$(id -gn "$USERNAME")"
+ACTUAL_SHELL="$(getent passwd "$USERNAME" | cut -d: -f7)"
+ACTUAL_HOME="$(getent passwd "$USERNAME" | cut -d: -f6)"
+if [[ "$ACTUAL_PRIMARY_GROUP" != "$PRIMARY_GROUP" || "$ACTUAL_SHELL" != "/bin/bash" || ! -d "$ACTUAL_HOME" ]]; then
+    log_error "Primary group, login shell, or home-directory verification failed."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
+    exit 1
+fi
+if [[ "$(stat -c '%U:%G' "$BASHRC")" != "$USERNAME:$PRIMARY_GROUP" ]]; then
+    log_error ".bashrc ownership verification failed."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
     exit 1
 fi
 
@@ -276,6 +338,7 @@ log_info "Password aging information:"
 
 if ! chage -l "$USERNAME"; then
     log_error "Could not retrieve password aging information."
+    userdel -r "$USERNAME" &>/dev/null || log_error "Could not remove incomplete account '$USERNAME'."
     exit 1
 fi
 
