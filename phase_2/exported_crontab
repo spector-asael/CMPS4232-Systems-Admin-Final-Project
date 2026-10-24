@@ -22,7 +22,12 @@
 #
 # m h  dom mon dow   command
 
+# /etc/cron.d/sys_automation or sudo crontab -l export
+SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-SCRIPT_DIR=/home/spector/scripts
 
-0 0 * * * $SCRIPT_DIR/log_analyzer.sh >> /var/log/log_analyzer_cron.log 2>&1
+# 1. Execute Log Analyzer daily at midnight
+0 0 * * * root /home/spector/scripts/log_analyzer.sh >> /var/log/log_analyzer_cron.log 2>&1
+
+# 2. Execute Process Watchdog every minute 
+* * * * * root /home/spector/scripts/process_watchdog.sh >> /var/log/process_watchdog_cron.log 2>&1
