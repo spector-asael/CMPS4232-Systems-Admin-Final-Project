@@ -46,7 +46,6 @@ fi
 # ------------------------------------------------------------
 # 1.5 Check if required groups exist; prompt/run initial_setup.sh if missing
 # ------------------------------------------------------------
-# Phase 1 correction from feedback: Check if groups exist; if not, prompt or run initial_setup.sh automatically.
 MISSING_GROUPS=0
 for GRP in "sysadmins" "developers" "auditors"; do
     if ! getent group "$GRP" &>/dev/null; then
@@ -62,6 +61,8 @@ if [[ $MISSING_GROUPS -eq 1 ]]; then
         if [[ -f "./initial_setup.sh" ]]; then
             log_info "Executing ./initial_setup.sh..."
             bash ./initial_setup.sh
+            log_info "initial_setup.sh execution finished. Exiting sys_init.sh."
+            exit 0
         else
             log_error "initial_setup.sh not found in current directory. Please run initial_setup.sh first."
             exit 1
@@ -129,27 +130,7 @@ done
 
 
 # ------------------------------------------------------------
-# 4. Ask administrator for primary group
-# ------------------------------------------------------------
-
-while true; do
-    read -r -p \
-        "Enter the primary group (sysadmins/developers/auditors): " \
-        PRIMARY_GROUP
-
-    # Check that the group exists.
-    if ! getent group "$PRIMARY_GROUP" &>/dev/null; then
-        log_error "Group '$PRIMARY_GROUP' does not exist."
-        log_error "Please run initial_setup.sh first or enter a valid group."
-        continue
-    fi
-
-    break
-done
-
-
-# ------------------------------------------------------------
-# 5. Ask for secondary groups
+# 4. Ask for secondary groups
 # ------------------------------------------------------------
 
 read -r -p \
@@ -162,25 +143,18 @@ if [[ -n "$SECONDARY_GROUPS" ]]; then
     IFS=',' read -ra GROUP_LIST <<< "$SECONDARY_GROUPS"
 
     for GROUP in "${GROUP_LIST[@]}"; do
-        # Phase 1 correction from feedback: Input validation & error handling for whitespace and duplicates
         GROUP=$(echo "$GROUP" | xargs) # trim whitespace
 
         if ! getent group "$GROUP" &>/dev/null; then
             log_error "Secondary group '$GROUP' does not exist."
             exit 1
         fi
-
-        if [[ "$GROUP" == "$PRIMARY_GROUP" ]]; then
-            log_error "Primary group should not also be a secondary group."
-            exit 1
-        fi
-
     done
 fi
 
 
 # ------------------------------------------------------------
-# 6. Ask for the initial password
+# 5. Ask for the initial password
 # ------------------------------------------------------------
 
 while true; do
@@ -211,7 +185,7 @@ done
 
 
 # ------------------------------------------------------------
-# 7. Create the new user
+# 6. Create the new user (default primary group = USERNAME)
 # ------------------------------------------------------------
 
 log_info "Creating user '$USERNAME'..."
@@ -219,20 +193,18 @@ log_info "Creating user '$USERNAME'..."
 if [[ -n "$SECONDARY_GROUPS" ]]; then
 
     run_cmd "create user '$USERNAME'" \
-        useradd -m -g "$PRIMARY_GROUP" -G "$SECONDARY_GROUPS" \
-        -s /bin/bash "$USERNAME"
+        useradd -m -G "$SECONDARY_GROUPS" -s /bin/bash "$USERNAME"
 
 else
 
     run_cmd "create user '$USERNAME'" \
-        useradd -m -g "$PRIMARY_GROUP" \
-        -s /bin/bash "$USERNAME"
+        useradd -m -s /bin/bash "$USERNAME"
 
 fi
 
 
 # ------------------------------------------------------------
-# 8. Set the initial password
+# 7. Set the initial password
 # ------------------------------------------------------------
 
 log_info "Setting initial password for '$USERNAME'."
@@ -251,7 +223,7 @@ unset PASSWORD_CONFIRM
 
 
 # ------------------------------------------------------------
-# 9. Force password change on first login
+# 8. Force password change on first login
 # ------------------------------------------------------------
 
 run_cmd "force password change for '$USERNAME'" \
@@ -259,7 +231,7 @@ run_cmd "force password change for '$USERNAME'" \
 
 
 # ------------------------------------------------------------
-# 10. Customize the user's .bashrc file
+# 9. Customize the user's .bashrc file
 # ------------------------------------------------------------
 
 USER_HOME="/home/$USERNAME"
@@ -289,11 +261,11 @@ fi
 
 # Make sure the new user owns the .bashrc file.
 run_cmd "set ownership of $BASHRC" \
-    chown "$USERNAME:$PRIMARY_GROUP" "$BASHRC"
+    chown "$USERNAME:$USERNAME" "$BASHRC"
 
 
 # ------------------------------------------------------------
-# 11. Verify the account
+# 10. Verify the account
 # ------------------------------------------------------------
 
 log_info "Verifying the new account..."
@@ -313,13 +285,13 @@ fi
 
 
 # ------------------------------------------------------------
-# 12. Finish
+# 11. Finish
 # ------------------------------------------------------------
 
 echo
 log_info "User provisioning completed successfully."
 log_info "Username: $USERNAME"
-log_info "Primary group: $PRIMARY_GROUP"
+log_info "Primary group: $USERNAME (default)"
 log_info "Secondary groups: ${SECONDARY_GROUPS:-none}"
 log_info "Log file: $LOG_FILE"
 
