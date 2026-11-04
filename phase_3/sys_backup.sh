@@ -20,6 +20,9 @@ TARGET_DIRS=(
     "/srv/sysadmins/dashboard"
 )
 
+# Global array to hold verified target directories
+VALID_TARGETS=()
+
 # ------------------------------------------------------------
 # Modular Helper & Logging Functions
 # ------------------------------------------------------------
@@ -62,17 +65,17 @@ init_backup_environment() {
 
 # 3. Modular Check: Target Directory Validation
 validate_targets() {
-    local valid_targets=()
+    VALID_TARGETS=()
     for dir in "${TARGET_DIRS[@]}"; do
         if [[ -d "$dir" ]]; then
-            valid_targets+=("$dir")
+            VALID_TARGETS+=("$dir")
             log_action "INFO" "Target path validated: $dir"
         else
             log_action "WARN" "Target path missing or unreachable: $dir (skipping)."
         fi
     done
 
-    if [[ ${#valid_targets[@]} -eq 0 ]]; then
+    if [[ ${#VALID_TARGETS[@]} -eq 0 ]]; then
         log_action "ERROR" "No valid target directories exist to perform backup."
         exit 1
     fi
@@ -83,11 +86,12 @@ create_throttled_archive() {
     local archive_path="$1"
     log_action "INFO" "Initiating CPU-throttled tar compression (nice priority level: +$NICE_PRIORITY)..."
 
-    # Spawn tar compression background job under nice scheduling priority
-    nice -n "$NICE_PRIORITY" tar -czf "$archive_path" "${TARGET_DIRS[@]}" 2>/dev/null &
+    # Spawn tar compression background job using only validated target paths
+    nice -n "$NICE_PRIORITY" tar -czf "$archive_path" "${VALID_TARGETS[@]}" 2>/dev/null &
     local tar_pid=$!
 
     # Audit active background process niceness to verify CPU priority throttling
+    sleep 0.1
     if kill -0 "$tar_pid" 2>/dev/null; then
         local current_nice
         current_nice=$(ps -o ni= -p "$tar_pid" 2>/dev/null | tr -d ' ' || true)
@@ -96,12 +100,19 @@ create_throttled_archive() {
         fi
     fi
 
-    # Wait for process termination and catch non-zero exit codes
-    wait "$tar_pid" || {
-        log_action "ERROR" "Compression process failed for archive: $archive_path"
+    # Capture wait exit status safely (tar status 1 = file changed during read warning, status 2+ = fatal)
+    set +e
+    wait "$tar_pid"
+    local tar_status=$?
+    set -e
+
+    if [[ $tar_status -gt 1 ]]; then
+        log_action "ERROR" "Compression process failed with fatal code $tar_status for archive: $archive_path"
         [[ -f "$archive_path" ]] && rm -f "$archive_path"
         exit 1
-    }
+    elif [[ $tar_status -eq 1 ]]; then
+        log_action "WARN" "Tar finished with minor warnings (some files changed during read)."
+    fi
 }
 
 # 5. Modular Verification: Integrity Testing & File Hardening
