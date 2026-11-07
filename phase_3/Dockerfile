@@ -12,6 +12,9 @@ ENV APP_TITLE="TechVille System Health Dashboard" \
 	MAINTAINER="sysadmins" \
 	REFRESH_RATE="30"
 
+# Force NGINX workers to run as root to read the 2770 volume mount
+RUN sed -i 's/user nginx;/user root;/g' /etc/nginx/nginx.conf
+
 # Set working directory inside container
 WORKDIR /usr/share/nginx/html
 
