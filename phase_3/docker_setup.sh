@@ -51,7 +51,7 @@ fi
 
 # Enforce 2775 (SGID bit + rwxrwsr-x)
 chmod 2775 "$DASHBOARD_DIR"
-log_info "Permissions on $DASHBOARD_DIR set to 2770."
+log_info "Permissions on $DASHBOARD_DIR set to 2775."
 
 # 4. Generate Baseline Dashboard Template
 INDEX_FILE="$DASHBOARD_DIR/index.html"
