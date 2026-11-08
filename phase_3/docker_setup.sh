@@ -49,8 +49,8 @@ else
     chown -R root:root "$DASHBOARD_DIR"
 fi
 
-# Enforce 2770 (SGID bit + rwxrwx---)
-chmod 2770 "$DASHBOARD_DIR"
+# Enforce 2775 (SGID bit + rwxrwsr-x)
+chmod 2775 "$DASHBOARD_DIR"
 log_info "Permissions on $DASHBOARD_DIR set to 2770."
 
 # 4. Generate Baseline Dashboard Template
@@ -83,5 +83,13 @@ if [[ ! -f "$INDEX_FILE" ]]; then
 EOF
     chmod 664 "$INDEX_FILE"
 fi
+
+# 5. Enforce Execute Permissions on Diagnostic Scripts
+
+log_info "Setting execute permissions on project scripts..."
+chmod +x ./*.sh 2>/dev/null || true
+
+cp "$INDEX_FILE" ./index.html
+chmod 644 ./index.html
 
 log_info "Host environment setup complete!"

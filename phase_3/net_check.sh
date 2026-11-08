@@ -14,6 +14,11 @@ TARGET_URL="http://localhost:${HOST_PORT}"
 EXTERNAL_IP="8.8.8.8"
 DOMAIN_TEST="google.com"
 LOG_FILE="/var/log/net_check.log"
+# Mount path targets for NGINX dashboard integration
+DASHBOARD_DIR="/srv/sysadmins/dashboard"
+METRICS_DIR="${DASHBOARD_DIR}/metrics"
+METRICS_FILE="${METRICS_DIR}/net_status.html"
+
 
 # Terminal Color Codes
 GREEN="\e[32m"
@@ -46,7 +51,7 @@ log_action() {
 
 # 1. Modular Check: Binary Dependency Verification
 check_prerequisites() {
-    local req_cmds=("curl" "ping" "docker" "ss")
+    local req_cmds=("curl" "ping" "docker" "ss" "ip" "awk")
     for cmd in "${req_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             log_action "ERROR" "Required system utility '$cmd' is not installed or not in PATH."
@@ -117,20 +122,119 @@ check_port_listening() {
     fi
 }
 
-# 5. Modular Check: End-to-End HTTP Application Response
+
+# 5. HTML Metric Publishing & Interface Statistics Generation
+publish_dashboard_metrics() {
+    log_action "INFO" "Generating diagnostic HTML metrics into $METRICS_FILE..."
+
+    mkdir -p "$METRICS_DIR"
+    chmod 755 "$METRICS_DIR"
+
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+    local iface_rows
+    iface_rows=$(ip -s link | awk '
+        /^[0-9]+:/ { iface=$2; gsub(":", "", iface); next }
+        /RX:/ { getline; rx_bytes=$1; rx_packets=$2; next }
+        /TX:/ { getline; tx_bytes=$1; tx_packets=$2; 
+                printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", iface, rx_bytes, rx_packets, tx_bytes, tx_packets }
+    ' 2>/dev/null || echo "<tr><td colspan='5'>Interface stats unavailable</td></tr>")
+
+    local port_rows
+    port_rows=$(ss -tulpn | awk 'NR>1 { printf "<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n", $1, $5, $7 }' 2>/dev/null || echo "<tr><td colspan='3'>Port stats unavailable</td></tr>")
+
+    cat <<EOF > "$METRICS_FILE"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="15">
+    <title>TechVille Network & Container Metrics</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f8f9fa; color: #212529; }
+        h1, h2 { color: #0d6efd; border-bottom: 2px solid #0d6efd; padding-bottom: 6px; }
+        .card { background: #fff; padding: 15px; margin-bottom: 20px; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #dee2e6; padding: 8px; text-align: left; }
+        th { background-color: #e9ecef; }
+        code { background: #e9ecef; padding: 2px 6px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>TechVille System & Network Diagnostic Metrics</h1>
+    <p><em>Last Updated: ${timestamp}</em></p>
+
+    <div class="card">
+        <h2>Network Interface Statistics</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Interface</th>
+                    <th>RX Bytes</th>
+                    <th>RX Packets</th>
+                    <th>TX Bytes</th>
+                    <th>TX Packets</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${iface_rows}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>Active Host Socket Listeners</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Protocol</th>
+                    <th>Local Address:Port</th>
+                    <th>Process / Service</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${port_rows}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>
+EOF
+
+    chmod 644 "$METRICS_FILE"
+    log_action "INFO" "Dashboard metrics successfully written to $METRICS_FILE."
+}
+
+# 6. Modular Check: End-to-End HTTP Application & Metric Endpoint Response
 check_http_endpoint() {
-    log_action "INFO" "Testing web endpoint at $TARGET_URL..."
+    log_action "INFO" "Testing main web endpoint at $TARGET_URL..."
 
     local http_code
     http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$TARGET_URL" || echo "000")
 
     if [[ "$http_code" == "200" ]]; then
-        log_action "INFO" "HTTP endpoint check SUCCESS (HTTP status code $http_code OK)."
+        log_action "INFO" "Main HTTP endpoint check SUCCESS (HTTP status code $http_code OK)."
     else
-        log_action "ERROR" "HTTP endpoint check FAILED! Received HTTP status code '$http_code' (Expected: 200)."
+        log_action "ERROR" "Main HTTP endpoint check FAILED! Received HTTP status code '$http_code' (Expected: 200)."
+        return 1
+    fi
+
+    local metrics_url="${TARGET_URL}/metrics/net_status.html"
+    log_action "INFO" "Testing metrics web endpoint at $metrics_url..."
+
+    local metrics_code
+    metrics_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$metrics_url" || echo "000")
+
+    if [[ "$metrics_code" == "200" ]]; then
+        log_action "INFO" "Metrics HTTP endpoint check SUCCESS (HTTP status code $metrics_code OK)."
+    else
+        log_action "ERROR" "Metrics HTTP endpoint check FAILED! Received HTTP status code '$metrics_code' (Expected: 200)."
         return 1
     fi
 }
+
+
 
 # ------------------------------------------------------------
 # Main Execution Entry Point
@@ -143,9 +247,10 @@ main() {
     local overall_status=0
 
     check_prerequisites
-    check_network_connectivity || overall_status=1
+    check_network_connectivity	|| overall_status=1
     check_container_status      || overall_status=1
     check_port_listening        || overall_status=1
+    publish_dashboard_metrics 	|| overall_status=1
     check_http_endpoint         || overall_status=1
 
     log_action "INFO" "=================================================="

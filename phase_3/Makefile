@@ -31,6 +31,7 @@ run:
 		echo "[!] Container $(CONTAINER_NAME) is already active."; \
 	else \
 		echo "[+] Launching $(CONTAINER_NAME)..."; \
+		sudo docker rm -f $(CONTAINER_NAME) 2>/dev/null ]] true; \
 		sudo docker run -d \
 			--name $(CONTAINER_NAME) \
 			--restart unless-stopped \
@@ -61,6 +62,10 @@ rebuild: clean build run
 ## View real-time container log output
 logs:
 	sudo docker logs -f $(CONTAINER_NAME)
+
+## Execute net_check.sh
+check:
+	sudo ./net_check.sh
 
 ## Verify running process metrics and HTTP endpoint responsiveness
 status:
